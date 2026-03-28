@@ -17,38 +17,118 @@ export function parseQRData(rawText) {
 
 export default function QRScanner({ onScan, onClose }) {
   const scannerRef = useRef(null);
+  const mountedRef = useRef(true);
   const [error, setError] = useState(null);
+  const [manualInput, setManualInput] = useState("");
+  const [showManual, setShowManual] = useState(false);
+  const containerIdRef = useRef("qr-reader-" + Date.now());
 
   useEffect(() => {
-    let html5QrCode = null;
+    mountedRef.current = true;
+    let started = false;
 
     async function start() {
+      await new Promise((r) => setTimeout(r, 300));
+      if (!mountedRef.current) return;
+
+      const container = document.getElementById(containerIdRef.current);
+      if (!container) {
+        setError("Scanner container not found. Use manual input below.");
+        setShowManual(true);
+        return;
+      }
+
       try {
         const { Html5Qrcode } = await import("html5-qrcode");
-        html5QrCode = new Html5Qrcode("qr-reader");
+        if (!mountedRef.current) return;
+
+        const html5QrCode = new Html5Qrcode(containerIdRef.current);
         scannerRef.current = html5QrCode;
 
-        await html5QrCode.start(
-          { facingMode: "environment" },
-          { fps: 10, qrbox: { width: 250, height: 250 } },
-          (decodedText) => {
-            const parsed = parseQRData(decodedText);
-            if (parsed) {
-              html5QrCode.stop().catch(() => {});
-              onScan(parsed, decodedText);
-            }
-          },
-          () => {}
-        );
+        let cameras = [];
+        try {
+          cameras = await Html5Qrcode.getCameras();
+        } catch (camErr) {
+          console.warn("getCameras failed, trying facingMode fallback");
+        }
+
+        if (cameras && cameras.length > 0) {
+          let cameraId = cameras[0].id;
+          const backCam = cameras.find((c) =>
+            c.label.toLowerCase().includes("back") ||
+            c.label.toLowerCase().includes("rear") ||
+            c.label.toLowerCase().includes("environment")
+          );
+          if (backCam) cameraId = backCam.id;
+
+          await html5QrCode.start(
+            cameraId,
+            { fps: 10, qrbox: { width: 220, height: 220 }, aspectRatio: 1.0 },
+            (decodedText) => {
+              if (!mountedRef.current) return;
+              const parsed = parseQRData(decodedText);
+              if (parsed) {
+                html5QrCode.stop().catch(() => {});
+                started = false;
+                onScan(parsed, decodedText);
+              }
+            },
+            () => {}
+          );
+        } else {
+          await html5QrCode.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 220, height: 220 }, aspectRatio: 1.0 },
+            (decodedText) => {
+              if (!mountedRef.current) return;
+              const parsed = parseQRData(decodedText);
+              if (parsed) {
+                html5QrCode.stop().catch(() => {});
+                started = false;
+                onScan(parsed, decodedText);
+              }
+            },
+            () => {}
+          );
+        }
+        started = true;
       } catch (err) {
-        console.error("Camera error:", err);
-        setError("Camera access denied or unavailable. Try manual entry instead.");
+        console.error("QR Scanner error:", err);
+        if (!mountedRef.current) return;
+        const msg = err.toString();
+        if (msg.includes("NotAllowed") || msg.includes("Permission")) {
+          setError("Camera permission denied. Allow camera access in Settings > Safari, or use manual input.");
+        } else if (msg.includes("NotFound") || msg.includes("No cameras")) {
+          setError("No camera found. Use manual input below.");
+        } else if (msg.includes("NotReadable") || msg.includes("Could not start")) {
+          setError("Camera is in use by another app, or not available. Use manual input below.");
+        } else {
+          setError("Camera could not start. This sometimes happens on iOS. Use manual input below.");
+        }
+        setShowManual(true);
       }
     }
 
     start();
-    return () => { scannerRef.current?.stop().catch(() => {}); };
+
+    return () => {
+      mountedRef.current = false;
+      if (scannerRef.current) {
+        try {
+          scannerRef.current.stop().catch(() => {});
+        } catch (e) {}
+      }
+      scannerRef.current = null;
+    };
   }, [onScan]);
+
+  const handleManualSubmit = () => {
+    if (!manualInput.trim()) return;
+    const parsed = parseQRData(manualInput.trim());
+    if (parsed) {
+      onScan(parsed, manualInput.trim());
+    }
+  };
 
   return (
     <div>
@@ -62,21 +142,61 @@ export default function QRScanner({ onScan, onClose }) {
         }}>Cancel</button>
       </div>
 
-      <div id="qr-reader" style={{
-        width: "100%", borderRadius: 16, overflow: "hidden", marginBottom: 16,
-        background: "#0A0A0F", minHeight: 280,
-      }} />
+      <div
+        id={containerIdRef.current}
+        style={{
+          width: "100%", borderRadius: 16, overflow: "hidden", marginBottom: 16,
+          background: "#0A0A0F", minHeight: 280,
+        }}
+      />
 
       {error && (
         <div style={{
           padding: 14, background: "rgba(255,107,107,0.1)", border: "1px solid rgba(255,107,107,0.3)",
-          borderRadius: 12, fontSize: 13, color: "#FF6B6B",
+          borderRadius: 12, fontSize: 13, color: "#FF6B6B", marginBottom: 12, lineHeight: 1.5,
         }}>{error}</div>
       )}
 
-      <div style={{ fontSize: 12, color: "#555", textAlign: "center", lineHeight: 1.6 }}>
-        Point camera at a machine QR code.
-      </div>
+      {showManual && (
+        <div style={{
+          padding: 16, background: "#0A0A0F", borderRadius: 12,
+          border: "1px solid #2A2A35", marginTop: 8,
+        }}>
+          <div style={{ fontSize: 10, color: "#888", fontFamily: "'Space Mono', monospace", letterSpacing: "1px", marginBottom: 8 }}>
+            PASTE QR CODE DATA MANUALLY
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="text"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              placeholder='{"name":"Chest Press","muscle":"Chest"}'
+              style={{
+                flex: 1, background: "#141419", border: "1px solid #2A2A35", borderRadius: 8,
+                padding: "10px 12px", color: "#E8E6E1", fontSize: 13, outline: "none",
+                fontFamily: "'Space Mono', monospace",
+              }}
+            />
+            <button onClick={handleManualSubmit} style={{
+              background: "#C6FF00", color: "#0A0A0F", border: "none",
+              padding: "10px 16px", borderRadius: 8, fontSize: 13,
+              fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+            }}>Go</button>
+          </div>
+        </div>
+      )}
+
+      {!showManual && (
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 12, color: "#555", lineHeight: 1.6, marginBottom: 8 }}>
+            Point camera at a machine QR code.
+          </div>
+          <button onClick={() => setShowManual(true)} style={{
+            background: "none", border: "none", color: "#666",
+            fontSize: 12, cursor: "pointer", textDecoration: "underline",
+          }}>Camera not working? Enter manually</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -144,7 +264,7 @@ export function QRGenerator() {
         }}>Hide</button>
       </div>
       <div style={{ fontSize: 12, color: "#666", marginBottom: 14, lineHeight: 1.5 }}>
-        Display on another screen and scan, or print them to stick on gym machines.
+        Display on another screen and scan, or print for your gym machines.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         {qrImages.map((ex) => (

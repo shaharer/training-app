@@ -1,15 +1,16 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import { useWorkouts, usePlan, useVideos, useUserProfile } from "../hooks/useFirestore";
+import { useWorkouts, usePlan, useVideos } from "../hooks/useFirestore";
 import QRScanner, { QRGenerator } from "./QRScanner";
+import ExercisePicker from "./ExercisePicker";
 
+// ─── Constants ──────────────────────────────────────────────────
 const MUSCLE_GROUPS = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core", "Other"];
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const muscleColors = {
   Chest: "#FF6B6B", Back: "#4ECDC4", Legs: "#FFE66D",
   Shoulders: "#A8E6CF", Arms: "#DDA0DD", Core: "#FF9A76", Other: "#888",
 };
-
 const AI_TIPS = [
   "Log consistently for 2 weeks and I'll start suggesting progressive overload targets.",
   "Tip: Scan gym machine QR codes for faster, error-free exercise logging.",
@@ -17,6 +18,59 @@ const AI_TIPS = [
   "Balance your push/pull ratio — check your muscle distribution on the dashboard.",
   "Rest days are training days. Recovery is where growth happens.",
 ];
+
+// ─── Shared styles ──────────────────────────────────────────────
+const inputStyle = {
+  width: "100%", boxSizing: "border-box",
+  background: "#0A0A0F", border: "1px solid #2A2A35", borderRadius: 10,
+  padding: "12px 14px", color: "#E8E6E1", fontSize: 15,
+  fontFamily: "'DM Sans', sans-serif", outline: "none",
+};
+const numInputStyle = {
+  ...inputStyle, fontSize: 18, fontFamily: "'Space Mono', monospace", textAlign: "center",
+};
+const labelStyle = {
+  fontSize: 10, color: "#555", fontFamily: "'Space Mono', monospace",
+  letterSpacing: "1px", marginBottom: 6, display: "block",
+};
+
+// ─── STABLE sub-components (defined OUTSIDE main component) ─────
+// This is the fix for Bug #1 — these don't re-create on parent render
+
+function MuscleSelect({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {MUSCLE_GROUPS.map((m) => (
+        <button type="button" key={m} onClick={() => onChange(m)} style={{
+          background: value === m ? (muscleColors[m] || "#888") + "33" : "#0A0A0F",
+          border: `1px solid ${value === m ? muscleColors[m] || "#888" : "#2A2A35"}`,
+          color: value === m ? muscleColors[m] || "#888" : "#666",
+          padding: "8px 14px", borderRadius: 100, fontSize: 12,
+          fontWeight: 600, cursor: "pointer", transition: "all 0.15s ease",
+        }}>{m}</button>
+      ))}
+    </div>
+  );
+}
+
+function NumberInput({ value, onChange, placeholder, label }) {
+  return (
+    <div>
+      <span style={labelStyle}>{label}</span>
+      <input
+        type="number"
+        inputMode="numeric"
+        pattern="[0-9]*"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={numInputStyle}
+        onFocus={(e) => { e.target.style.borderColor = "#C6FF00"; }}
+        onBlur={(e) => { e.target.style.borderColor = "#2A2A35"; }}
+      />
+    </div>
+  );
+}
 
 function ConfirmDialog({ message, onConfirm, onCancel }) {
   return (
@@ -46,12 +100,21 @@ function ConfirmDialog({ message, onConfirm, onCancel }) {
   );
 }
 
+function primaryBtn(disabled) {
+  return {
+    width: "100%", background: "#C6FF00", color: "#0A0A0F", border: "none",
+    padding: "14px", borderRadius: 100, fontSize: 14, fontWeight: 700,
+    cursor: disabled ? "default" : "pointer", fontFamily: "'Space Mono', monospace",
+    opacity: disabled ? 0.4 : 1, transition: "opacity 0.2s",
+  };
+}
+
+// ─── Main App ───────────────────────────────────────────────────
 export default function TrainingApp() {
   const { user, logout } = useAuth();
   const { workouts, addWorkout, removeWorkout } = useWorkouts();
   const { plan, updatePlan } = usePlan();
-  const { videos, addVideo, removeVideo } = useVideos();
-  const { profile, updateProfile } = useUserProfile();
+  const { videos, addVideo } = useVideos();
 
   const [activeTab, setActiveTab] = useState("dashboard");
   const [aiTipIndex, setAiTipIndex] = useState(0);
@@ -63,13 +126,45 @@ export default function TrainingApp() {
   const [inputMode, setInputMode] = useState(null);
   const [scannerActive, setScannerActive] = useState(false);
   const [scannedMachine, setScannedMachine] = useState(null);
-  const [qrForm, setQrForm] = useState({ weight: "", reps: "", sets: "" });
-  const [manualForm, setManualForm] = useState({ exercise: "", muscle: "Chest", weight: "", reps: "", sets: "" });
-  const [videoForm, setVideoForm] = useState({ url: "", creator: "", title: "", exercise: "", muscle: "Chest" });
+  const [qrWeight, setQrWeight] = useState("");
+  const [qrReps, setQrReps] = useState("");
+  const [qrSets, setQrSets] = useState("");
+
+  // Manual form — individual state per field (prevents re-render coupling)
+  const [manualExercise, setManualExercise] = useState(null); // {name, muscle}
+  const [manualMuscle, setManualMuscle] = useState("Chest");
+  const [manualWeight, setManualWeight] = useState("");
+  const [manualReps, setManualReps] = useState("");
+  const [manualSets, setManualSets] = useState("");
+
+  // Video form
+  const [videoUrl, setVideoUrl] = useState("");
+  const [videoCreator, setVideoCreator] = useState("");
+  const [videoTitle, setVideoTitle] = useState("");
+  const [videoExercise, setVideoExercise] = useState(null);
+  const [videoMuscle, setVideoMuscle] = useState("Chest");
 
   // Plan tab
   const [editingDay, setEditingDay] = useState(null);
-  const [planExForm, setPlanExForm] = useState({ exercise: "", muscle: "Chest" });
+  const [planExercise, setPlanExercise] = useState(null);
+  const [planMuscle, setPlanMuscle] = useState("Chest");
+
+  // ─── Build known exercises list from all workouts ─────────────
+  const knownExercises = useMemo(() => {
+    const map = new Map();
+    workouts.forEach((w) => {
+      if (w.exercise && !map.has(w.exercise.toLowerCase())) {
+        map.set(w.exercise.toLowerCase(), { name: w.exercise, muscle: w.muscle });
+      }
+    });
+    // Also add from plan
+    Object.values(plan).flat().forEach((p) => {
+      if (p.exercise && !map.has(p.exercise.toLowerCase())) {
+        map.set(p.exercise.toLowerCase(), { name: p.exercise, muscle: p.muscle });
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [workouts, plan]);
 
   useEffect(() => {
     const interval = setInterval(() => setAiTipIndex((i) => (i + 1) % AI_TIPS.length), 6000);
@@ -83,44 +178,53 @@ export default function TrainingApp() {
 
   // ─── Handlers ─────────────────────────────────────────────────
   const handleManualSubmit = async () => {
-    if (!manualForm.exercise || !manualForm.weight || !manualForm.reps || !manualForm.sets) return;
+    if (!manualExercise || !manualWeight || !manualReps || !manualSets) return;
     await addWorkout({
-      exercise: manualForm.exercise, muscle: manualForm.muscle,
-      weight: Number(manualForm.weight), reps: Number(manualForm.reps),
-      sets: Number(manualForm.sets), source: "manual",
+      exercise: manualExercise.name, muscle: manualExercise.muscle || manualMuscle,
+      weight: Number(manualWeight), reps: Number(manualReps),
+      sets: Number(manualSets), source: "manual",
     });
-    showNotif(`✓ Logged: ${manualForm.exercise}`);
-    setManualForm({ exercise: "", muscle: "Chest", weight: "", reps: "", sets: "" });
+    showNotif(`✓ Logged: ${manualExercise.name}`);
+    setManualExercise(null);
+    setManualWeight("");
+    setManualReps("");
+    setManualSets("");
   };
 
   const handleQRResult = useCallback((parsed) => {
     setScannedMachine(parsed);
     setScannerActive(false);
-    setQrForm({ weight: "", reps: "", sets: "" });
+    setQrWeight("");
+    setQrReps("");
+    setQrSets("");
   }, []);
 
   const handleQRLog = async () => {
-    if (!scannedMachine || !qrForm.weight || !qrForm.reps || !qrForm.sets) return;
+    if (!scannedMachine || !qrWeight || !qrReps || !qrSets) return;
     await addWorkout({
       exercise: scannedMachine.name, muscle: scannedMachine.muscle,
-      weight: Number(qrForm.weight), reps: Number(qrForm.reps),
-      sets: Number(qrForm.sets), source: "qr", machineId: scannedMachine.machineId,
+      weight: Number(qrWeight), reps: Number(qrReps),
+      sets: Number(qrSets), source: "qr", machineId: scannedMachine.machineId,
     });
     showNotif(`✓ Logged: ${scannedMachine.name}`);
     setScannedMachine(null);
-    setQrForm({ weight: "", reps: "", sets: "" });
+    setQrWeight(""); setQrReps(""); setQrSets("");
   };
 
   const handleVideoSave = async () => {
-    if (!videoForm.exercise || !videoForm.creator || !videoForm.title) return;
-    await addVideo(videoForm);
+    if (!videoExercise || !videoCreator || !videoTitle) return;
+    const vData = {
+      url: videoUrl, creator: videoCreator, title: videoTitle,
+      exercise: videoExercise.name, muscle: videoExercise.muscle || videoMuscle,
+    };
+    await addVideo(vData);
     await addWorkout({
-      exercise: videoForm.exercise, muscle: videoForm.muscle,
-      weight: 0, reps: 0, sets: 0, source: "video",
-      videoRef: videoForm.url || videoForm.title,
+      exercise: videoExercise.name, muscle: videoExercise.muscle || videoMuscle,
+      weight: 0, reps: 0, sets: 0, source: "video", videoRef: videoUrl || videoTitle,
     });
-    showNotif(`✓ Saved: ${videoForm.exercise}`);
-    setVideoForm({ url: "", creator: "", title: "", exercise: "", muscle: "Chest" });
+    showNotif(`✓ Saved: ${videoExercise.name}`);
+    setVideoUrl(""); setVideoCreator(""); setVideoTitle("");
+    setVideoExercise(null);
   };
 
   const handleDeleteWorkout = (id) => {
@@ -131,13 +235,13 @@ export default function TrainingApp() {
   };
 
   const addToPlan = async (day) => {
-    if (!planExForm.exercise) return;
+    if (!planExercise) return;
     const newPlan = {
       ...plan,
-      [day]: [...(plan[day] || []), { exercise: planExForm.exercise, muscle: planExForm.muscle }],
+      [day]: [...(plan[day] || []), { exercise: planExercise.name, muscle: planExercise.muscle || planMuscle }],
     };
     await updatePlan(newPlan);
-    setPlanExForm({ exercise: "", muscle: "Chest" });
+    setPlanExercise(null);
     setEditingDay(null);
   };
 
@@ -155,63 +259,16 @@ export default function TrainingApp() {
   const totalSets = workouts.reduce((s, w) => s + (w.sets || 0), 0);
   const uniqueDays = [...new Set(workouts.map((w) => w.date))].length;
   const todayDayName = WEEKDAYS[((new Date().getDay() + 6) % 7)];
-
-  const knownExercises = [...new Set(workouts.map((w) => w.exercise))].sort();
   const sourceIcon = (s) => (s === "qr" ? "📱" : s === "video" ? "🎬" : "✏️");
   const sourceLabel = (s) => (s === "qr" ? "QR Scan" : s === "video" ? "Video" : "Manual");
 
-  const inputStyle = {
-    width: "100%", boxSizing: "border-box",
-    background: "#0A0A0F", border: "1px solid #2A2A35", borderRadius: 10,
-    padding: "12px 14px", color: "#E8E6E1", fontSize: 15,
-    fontFamily: "'DM Sans', sans-serif", outline: "none",
-  };
-  const numInputStyle = { ...inputStyle, fontSize: 18, fontFamily: "'Space Mono', monospace", textAlign: "center" };
-  const labelStyle = { fontSize: 10, color: "#555", fontFamily: "'Space Mono', monospace", letterSpacing: "1px", marginBottom: 6, display: "block" };
-  const primaryBtn = (disabled) => ({
-    width: "100%", background: "#C6FF00", color: "#0A0A0F", border: "none",
-    padding: "14px", borderRadius: 100, fontSize: 14, fontWeight: 700,
-    cursor: disabled ? "default" : "pointer", fontFamily: "'Space Mono', monospace",
-    opacity: disabled ? 0.4 : 1, transition: "opacity 0.2s",
-  });
-
-  const MuscleSelect = ({ value, onChange }) => (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-      {MUSCLE_GROUPS.map((m) => (
-        <button key={m} onClick={() => onChange(m)} style={{
-          background: value === m ? (muscleColors[m] || "#888") + "33" : "#0A0A0F",
-          border: `1px solid ${value === m ? muscleColors[m] || "#888" : "#2A2A35"}`,
-          color: value === m ? muscleColors[m] || "#888" : "#666",
-          padding: "8px 14px", borderRadius: 100, fontSize: 12,
-          fontWeight: 600, cursor: "pointer", transition: "all 0.15s ease",
-        }}>{m}</button>
-      ))}
-    </div>
-  );
-
-  const NumFields = ({ form, setForm, fields }) => (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
-      {fields.map((f) => (
-        <div key={f.key}>
-          <span style={labelStyle}>{f.label.toUpperCase()}</span>
-          <input type="number" inputMode="numeric" placeholder={f.ph} value={form[f.key]}
-            onChange={(e) => setForm((p) => ({ ...p, [f.key]: e.target.value }))}
-            style={numInputStyle}
-            onFocus={(e) => (e.target.style.borderColor = "#C6FF00")}
-            onBlur={(e) => (e.target.style.borderColor = "#2A2A35")}
-          />
-        </div>
-      ))}
-    </div>
-  );
-
+  // ─── Render ───────────────────────────────────────────────────
   return (
     <div style={{
       minHeight: "100vh", background: "#0A0A0F", color: "#E8E6E1",
       fontFamily: "'DM Sans', 'Helvetica Neue', sans-serif",
       position: "relative", overflow: "hidden",
     }}>
-      {/* Ambient */}
       <div style={{ position: "fixed", top: -200, right: -200, width: 600, height: 600,
         background: "radial-gradient(circle, rgba(198,255,0,0.06) 0%, transparent 70%)",
         pointerEvents: "none", zIndex: 0 }} />
@@ -265,7 +322,7 @@ export default function TrainingApp() {
             background: "transparent", cursor: "pointer", padding: 0, overflow: "hidden",
           }}>
             {user?.photoURL ? (
-              <img src={user.photoURL} alt="" style={{ width: "100%", height: "100%", borderRadius: "50%" }} />
+              <img src={user.photoURL} alt="" style={{ width: "100%", height: "100%", borderRadius: "50%" }} referrerPolicy="no-referrer" />
             ) : (
               <div style={{
                 width: "100%", height: "100%", background: "linear-gradient(135deg, #C6FF00, #4ECDC4)",
@@ -286,9 +343,7 @@ export default function TrainingApp() {
               <button onClick={() => { logout(); setShowUserMenu(false); }} style={{
                 width: "100%", textAlign: "left", background: "none", border: "none",
                 padding: "10px 14px", color: "#FF6B6B", fontSize: 14, cursor: "pointer",
-              }}>
-                Sign out
-              </button>
+              }}>Sign out</button>
             </div>
           )}
         </div>
@@ -317,7 +372,6 @@ export default function TrainingApp() {
           <button key={tab} onClick={() => { setActiveTab(tab); setShowUserMenu(false); }} style={{
             flex: 1, padding: "10px 0", border: "none", borderRadius: 12, cursor: "pointer",
             fontFamily: "'Space Mono', monospace", fontSize: 12, fontWeight: 700,
-            letterSpacing: "0.5px",
             background: activeTab === tab ? "#C6FF00" : "transparent",
             color: activeTab === tab ? "#0A0A0F" : "#666",
             transition: "all 0.2s ease", textTransform: "capitalize",
@@ -371,6 +425,7 @@ export default function TrainingApp() {
               </div>
             )}
 
+            {/* Week */}
             <div style={{ background: "#141419", borderRadius: 16, padding: 20, border: "1px solid #1E1E26", marginBottom: 20 }}>
               <div style={{ fontSize: 10, color: "#666", fontFamily: "'Space Mono', monospace", letterSpacing: "2px", marginBottom: 16 }}>THIS WEEK</div>
               <div style={{ display: "flex", gap: 8 }}>
@@ -394,10 +449,11 @@ export default function TrainingApp() {
               </div>
             </div>
 
+            {/* Recent */}
             <div style={{ fontSize: 10, color: "#666", fontFamily: "'Space Mono', monospace", letterSpacing: "2px", marginBottom: 12 }}>RECENT ACTIVITY</div>
             {workouts.length === 0 && (
               <div style={{ padding: 40, textAlign: "center", color: "#444", fontSize: 14 }}>
-                No workouts yet. Go to Log tab to start!
+                No workouts yet. Hit the Log tab to start!
               </div>
             )}
             {workouts.slice(0, 10).map((w, i) => (
@@ -437,7 +493,7 @@ export default function TrainingApp() {
             <div style={{ fontSize: 13, color: "#666", marginBottom: 24 }}>Choose input method</div>
 
             {/* QR button */}
-            <button onClick={() => { setInputMode(inputMode === "qr" ? null : "qr"); setScannerActive(false); setScannedMachine(null); }} style={{
+            <button type="button" onClick={() => { setInputMode(inputMode === "qr" ? null : "qr"); setScannerActive(false); setScannedMachine(null); }} style={{
               width: "100%", textAlign: "left",
               background: inputMode === "qr" ? "rgba(198,255,0,0.08)" : "#141419",
               border: `1px solid ${inputMode === "qr" ? "rgba(198,255,0,0.3)" : "#1E1E26"}`,
@@ -454,7 +510,7 @@ export default function TrainingApp() {
             </button>
 
             {/* Video button */}
-            <button onClick={() => setInputMode(inputMode === "video" ? null : "video")} style={{
+            <button type="button" onClick={() => setInputMode(inputMode === "video" ? null : "video")} style={{
               width: "100%", textAlign: "left",
               background: inputMode === "video" ? "rgba(78,205,196,0.08)" : "#141419",
               border: `1px solid ${inputMode === "video" ? "rgba(78,205,196,0.3)" : "#1E1E26"}`,
@@ -487,7 +543,7 @@ export default function TrainingApp() {
                       <div style={{ fontSize: 40 }}>📷</div>
                       <div style={{ fontSize: 12, color: "#555" }}>Camera viewfinder</div>
                     </div>
-                    <button onClick={() => setScannerActive(true)} style={{
+                    <button type="button" onClick={() => setScannerActive(true)} style={{
                       background: "#C6FF00", color: "#0A0A0F", border: "none",
                       padding: "14px 40px", borderRadius: 100, fontSize: 14,
                       fontWeight: 700, cursor: "pointer", fontFamily: "'Space Mono', monospace",
@@ -512,18 +568,18 @@ export default function TrainingApp() {
                         <div style={{ fontSize: 18, fontWeight: 700 }}>{scannedMachine.name}</div>
                         <div style={{ fontSize: 12, color: "#888" }}>{scannedMachine.muscle}</div>
                       </div>
-                      <button onClick={() => { setScannedMachine(null); setScannerActive(false); }} style={{
+                      <button type="button" onClick={() => { setScannedMachine(null); setScannerActive(false); }} style={{
                         background: "none", border: "1px solid #333", color: "#888",
                         padding: "6px 12px", borderRadius: 100, fontSize: 11, cursor: "pointer",
                       }}>Rescan</button>
                     </div>
-                    <NumFields form={qrForm} setForm={setQrForm} fields={[
-                      { key: "weight", label: "Weight (lbs)", ph: "135" },
-                      { key: "reps", label: "Reps", ph: "10" },
-                      { key: "sets", label: "Sets", ph: "3" },
-                    ]} />
-                    <button onClick={handleQRLog}
-                      style={primaryBtn(!qrForm.weight || !qrForm.reps || !qrForm.sets)}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
+                      <NumberInput label="WEIGHT (LBS)" placeholder="135" value={qrWeight} onChange={setQrWeight} />
+                      <NumberInput label="REPS" placeholder="10" value={qrReps} onChange={setQrReps} />
+                      <NumberInput label="SETS" placeholder="3" value={qrSets} onChange={setQrSets} />
+                    </div>
+                    <button type="button" onClick={handleQRLog}
+                      style={primaryBtn(!qrWeight || !qrReps || !qrSets)}>
                       Log This Set →
                     </button>
                   </div>
@@ -542,66 +598,88 @@ export default function TrainingApp() {
                 </div>
                 <div style={{ marginBottom: 14 }}>
                   <span style={labelStyle}>VIDEO URL (optional)</span>
-                  <input type="url" placeholder="https://youtube.com/..." value={videoForm.url}
-                    onChange={(e) => setVideoForm((p) => ({ ...p, url: e.target.value }))}
-                    style={inputStyle} />
+                  <input type="url" placeholder="https://youtube.com/..." value={videoUrl}
+                    onChange={(e) => setVideoUrl(e.target.value)} style={inputStyle} />
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
                   <div>
                     <span style={labelStyle}>CREATOR</span>
-                    <input type="text" placeholder="@FitWithMike" value={videoForm.creator}
-                      onChange={(e) => setVideoForm((p) => ({ ...p, creator: e.target.value }))}
-                      style={inputStyle} />
+                    <input type="text" placeholder="@FitWithMike" value={videoCreator}
+                      onChange={(e) => setVideoCreator(e.target.value)} style={inputStyle} />
                   </div>
                   <div>
                     <span style={labelStyle}>VIDEO TITLE</span>
-                    <input type="text" placeholder="Perfect Squat Form" value={videoForm.title}
-                      onChange={(e) => setVideoForm((p) => ({ ...p, title: e.target.value }))}
-                      style={inputStyle} />
+                    <input type="text" placeholder="Perfect Squat Form" value={videoTitle}
+                      onChange={(e) => setVideoTitle(e.target.value)} style={inputStyle} />
                   </div>
                 </div>
                 <div style={{ marginBottom: 14 }}>
-                  <span style={labelStyle}>EXERCISE NAME</span>
-                  <input type="text" placeholder="e.g. Bulgarian Split Squat" value={videoForm.exercise}
-                    onChange={(e) => setVideoForm((p) => ({ ...p, exercise: e.target.value }))}
-                    style={inputStyle} list="ex-list" />
+                  <span style={labelStyle}>EXERCISE</span>
+                  <ExercisePicker
+                    value={videoExercise?.name || null}
+                    muscle={videoExercise?.muscle || videoMuscle}
+                    onSelect={(ex) => {
+                      if (ex) { setVideoExercise(ex); setVideoMuscle(ex.muscle); }
+                      else setVideoExercise(null);
+                    }}
+                    knownExercises={knownExercises}
+                    placeholder="Search or type exercise..."
+                  />
                 </div>
-                <div style={{ marginBottom: 20 }}>
-                  <span style={labelStyle}>MUSCLE GROUP</span>
-                  <MuscleSelect value={videoForm.muscle} onChange={(m) => setVideoForm((p) => ({ ...p, muscle: m }))} />
-                </div>
-                <button onClick={handleVideoSave}
-                  style={primaryBtn(!videoForm.exercise || !videoForm.creator || !videoForm.title)}>
+                {videoExercise?.isNew && (
+                  <div style={{ marginBottom: 14 }}>
+                    <span style={labelStyle}>MUSCLE GROUP</span>
+                    <MuscleSelect value={videoMuscle} onChange={(m) => {
+                      setVideoMuscle(m);
+                      setVideoExercise((prev) => prev ? { ...prev, muscle: m } : prev);
+                    }} />
+                  </div>
+                )}
+                <button type="button" onClick={handleVideoSave}
+                  style={primaryBtn(!videoExercise || !videoCreator || !videoTitle)}>
                   Save Video Reference →
                 </button>
               </div>
             )}
 
-            {/* Manual Entry */}
+            {/* ─── Manual Entry ─── */}
             <div style={{ background: "#141419", borderRadius: 20, padding: 24, border: "1px solid #1E1E26" }}>
               <div style={{ fontSize: 10, color: "#888", fontFamily: "'Space Mono', monospace", letterSpacing: "2px", marginBottom: 20 }}>
                 MANUAL ENTRY
               </div>
-              <datalist id="ex-list">
-                {knownExercises.map((ex) => <option key={ex} value={ex} />)}
-              </datalist>
+
               <div style={{ marginBottom: 14 }}>
-                <span style={labelStyle}>EXERCISE NAME</span>
-                <input type="text" placeholder="e.g. Bench Press" value={manualForm.exercise}
-                  onChange={(e) => setManualForm((p) => ({ ...p, exercise: e.target.value }))}
-                  style={inputStyle} list="ex-list" />
+                <span style={labelStyle}>EXERCISE</span>
+                <ExercisePicker
+                  value={manualExercise?.name || null}
+                  muscle={manualExercise?.muscle || manualMuscle}
+                  onSelect={(ex) => {
+                    if (ex) { setManualExercise(ex); setManualMuscle(ex.muscle); }
+                    else setManualExercise(null);
+                  }}
+                  knownExercises={knownExercises}
+                  placeholder="Search or type exercise name..."
+                />
               </div>
-              <div style={{ marginBottom: 14 }}>
-                <span style={labelStyle}>MUSCLE GROUP</span>
-                <MuscleSelect value={manualForm.muscle} onChange={(m) => setManualForm((p) => ({ ...p, muscle: m }))} />
+
+              {manualExercise?.isNew && (
+                <div style={{ marginBottom: 14 }}>
+                  <span style={labelStyle}>MUSCLE GROUP</span>
+                  <MuscleSelect value={manualMuscle} onChange={(m) => {
+                    setManualMuscle(m);
+                    setManualExercise((prev) => prev ? { ...prev, muscle: m } : prev);
+                  }} />
+                </div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
+                <NumberInput label="WEIGHT (LBS)" placeholder="135" value={manualWeight} onChange={setManualWeight} />
+                <NumberInput label="REPS" placeholder="10" value={manualReps} onChange={setManualReps} />
+                <NumberInput label="SETS" placeholder="3" value={manualSets} onChange={setManualSets} />
               </div>
-              <NumFields form={manualForm} setForm={setManualForm} fields={[
-                { key: "weight", label: "Weight (lbs)", ph: "135" },
-                { key: "reps", label: "Reps", ph: "10" },
-                { key: "sets", label: "Sets", ph: "3" },
-              ]} />
-              <button onClick={handleManualSubmit}
-                style={primaryBtn(!manualForm.exercise || !manualForm.weight || !manualForm.reps || !manualForm.sets)}>
+
+              <button type="button" onClick={handleManualSubmit}
+                style={primaryBtn(!manualExercise || !manualWeight || !manualReps || !manualSets)}>
                 Log Workout →
               </button>
             </div>
@@ -616,7 +694,6 @@ export default function TrainingApp() {
 
             {WEEKDAYS.map((day) => {
               const exercises = plan[day] || [];
-              const isRest = exercises.length === 0;
               const isEditing = editingDay === day;
               return (
                 <div key={day} style={{
@@ -624,12 +701,13 @@ export default function TrainingApp() {
                   border: `1px solid ${day === todayDayName ? "rgba(198,255,0,0.3)" : "#1E1E26"}`,
                   marginBottom: 10,
                 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isRest && !isEditing ? 0 : 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                    marginBottom: (exercises.length === 0 && !isEditing) ? 0 : 12 }}>
                     <div style={{
                       fontSize: 14, fontWeight: 700, fontFamily: "'Space Mono', monospace",
-                      color: day === todayDayName ? "#C6FF00" : isRest ? "#444" : "#E8E6E1",
+                      color: day === todayDayName ? "#C6FF00" : exercises.length === 0 ? "#444" : "#E8E6E1",
                     }}>{day} {day === todayDayName ? "(today)" : ""}</div>
-                    <button onClick={() => setEditingDay(isEditing ? null : day)} style={{
+                    <button type="button" onClick={() => setEditingDay(isEditing ? null : day)} style={{
                       background: "none", border: "1px solid #333", color: isEditing ? "#C6FF00" : "#666",
                       padding: "4px 12px", borderRadius: 100, fontSize: 11, cursor: "pointer",
                       fontFamily: "'Space Mono', monospace",
@@ -643,7 +721,8 @@ export default function TrainingApp() {
                     }}>
                       <div style={{ width: 8, height: 8, borderRadius: "50%", background: muscleColors[ex.muscle] || "#888" }} />
                       <div style={{ flex: 1, fontSize: 13, color: "#B8B5AD" }}>{ex.exercise}</div>
-                      <button onClick={() => removeFromPlan(day, i)} style={{
+                      <span style={{ fontSize: 10, color: muscleColors[ex.muscle] || "#666" }}>{ex.muscle}</span>
+                      <button type="button" onClick={() => removeFromPlan(day, i)} style={{
                         background: "none", border: "none", color: "#444", cursor: "pointer", fontSize: 14, padding: "2px 4px",
                       }}>×</button>
                     </div>
@@ -652,14 +731,27 @@ export default function TrainingApp() {
                   {isEditing && (
                     <div style={{ marginTop: 10, padding: 14, background: "#0A0A0F", borderRadius: 12 }}>
                       <div style={{ marginBottom: 10 }}>
-                        <input type="text" placeholder="Exercise name" value={planExForm.exercise}
-                          onChange={(e) => setPlanExForm((p) => ({ ...p, exercise: e.target.value }))}
-                          style={{ ...inputStyle, fontSize: 13 }} list="ex-list" />
+                        <ExercisePicker
+                          value={planExercise?.name || null}
+                          muscle={planExercise?.muscle || planMuscle}
+                          onSelect={(ex) => {
+                            if (ex) { setPlanExercise(ex); setPlanMuscle(ex.muscle); }
+                            else setPlanExercise(null);
+                          }}
+                          knownExercises={knownExercises}
+                          placeholder="Search or add exercise..."
+                        />
                       </div>
-                      <MuscleSelect value={planExForm.muscle}
-                        onChange={(m) => setPlanExForm((p) => ({ ...p, muscle: m }))} />
-                      <button onClick={() => addToPlan(day)} style={{
-                        ...primaryBtn(!planExForm.exercise), marginTop: 10, padding: 10, fontSize: 12,
+                      {planExercise?.isNew && (
+                        <div style={{ marginBottom: 10 }}>
+                          <MuscleSelect value={planMuscle} onChange={(m) => {
+                            setPlanMuscle(m);
+                            setPlanExercise((prev) => prev ? { ...prev, muscle: m } : prev);
+                          }} />
+                        </div>
+                      )}
+                      <button type="button" onClick={() => addToPlan(day)} style={{
+                        ...primaryBtn(!planExercise), padding: 10, fontSize: 12,
                       }}>Add to {day}</button>
                     </div>
                   )}
@@ -723,7 +815,7 @@ export default function TrainingApp() {
             {videos.length > 0 && (
               <div>
                 <div style={{ fontSize: 10, fontFamily: "'Space Mono', monospace", letterSpacing: "2px",
-                  color: "#4ECDC4", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                  color: "#4ECDC4", marginBottom: 10 }}>
                   SAVED VIDEOS
                 </div>
                 {videos.map((v) => (
